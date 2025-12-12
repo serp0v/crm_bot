@@ -1,6 +1,6 @@
 import asyncio
 import logging
-import json
+from datetime import datetime
 from typing import List, Dict
 from telegram import Bot
 from telegram.error import TelegramError
@@ -13,81 +13,76 @@ class TelegramNotifier:
         self.bot = Bot(token=Config.TELEGRAM_BOT_TOKEN)
         self.chat_id = Config.TELEGRAM_CHAT_ID
     
-    def format_request_message(self, request_data: Dict) -> str:
-        """Форматируем сообщение для одной заявки"""
-        message = (
-            "🚨 *Заявка на прозвоне*\n\n"
-            f"*ID:* `{request_data['id']}`\n"
-            f"*Дата:* {request_data['date']}\n"
-            f"*Тип:* {request_data['type']}\n"
-            f"*Статус:* {request_data['status']}\n"
-            f"*Город:* {request_data['city']}\n"
-            f"*Телефон:* {request_data['phone']}\n"
-            f"*Адрес:* {request_data['address']}\n"
-            f"*Создана:* {request_data['created_at']}\n"
-            f"*Клиент:* {request_data['client_name']}\n"
-            f"*Ссылка:* {request_data['url']}"
-        )
-        return message
-    
-    def format_summary_message(self, requests_count: int) -> str:
-        """Форматируем сводное сообщение"""
-        message = (
-            f"📊 *Сводка за час*\n\n"
-            f"*Найдено новых заявок на прозвоне:* {requests_count}\n"
-            f"*Время отправки:* {asyncio.get_event_loop().time() if asyncio.get_event_loop().is_running() else 'now'}"
-        )
-        return message
-    
-    async def send_single_request(self, request_data: Dict) -> bool:
-        """Отправляем одну заявку в Telegram"""
+    async def send_batch(self, requests_data: List[Dict], batch_number: int, is_urgent_only: bool = False) -> List[int]:
+        """Отправляем пачку заявок в новом формате"""
+        successful_ids = []
+        
+        if not requests_data:
+            logger.info("Нет заявок для отправки")
+            return successful_ids
+        
         try:
-            message = self.format_request_message(request_data)
+            # Фильтруем заявки если нужно только срочные
+            if is_urgent_only:
+                requests_to_send = [r for r in requests_data if r.get('is_urgent', False)]
+                if not requests_to_send:
+                    logger.info("Нет срочных заявок для повторной отправки")
+                    return []
+                batch_title = f"🔄 ПОВТОРНАЯ ОТПРАВКА #{batch_number}"
+            else:
+                requests_to_send = requests_data
+                batch_title = f"#{batch_number}"
             
+            # Формируем сообщение
+            message_lines = [batch_title, ""]
+            
+            for request_data in requests_to_send:
+                request_id = request_data['id']
+                prefix = "🟡" if request_data.get('is_urgent', False) else ""
+                message_lines.append(f"{prefix}`{request_id}`")
+            
+            message = "\n".join(message_lines)
+            
+            # Отправляем сообщение
             await self.bot.send_message(
                 chat_id=self.chat_id,
                 text=message,
                 parse_mode='Markdown',
-                disable_web_page_preview=True,
                 disable_notification=False
             )
             
-            logger.info(f"Заявка {request_data['id']} отправлена в Telegram")
-            return True
+            successful_ids = [r['id'] for r in requests_to_send]
+            batch_type = "срочная" if is_urgent_only else "обычная"
+            logger.info(f"Пачка #{batch_number} ({batch_type}) отправлена: {len(successful_ids)} заявок")
+            
+            # Небольшая пауза между сообщениями
+            await asyncio.sleep(1)
+            
+            return successful_ids
             
         except TelegramError as e:
-            logger.error(f"Ошибка Telegram при отправке заявки {request_data['id']}: {e}")
-            return False
+            logger.error(f"Ошибка Telegram при отправке пачки #{batch_number}: {e}")
+            return []
         except Exception as e:
-            logger.error(f"Неожиданная ошибка при отправке заявки {request_data['id']}: {e}")
-            return False
+            logger.error(f"Неожиданная ошибка при отправке пачки #{batch_number}: {e}")
+            return []
     
-    async def send_requests_batch(self, requests_data: List[Dict]) -> List[int]:
-        """Отправляем пачку заявок"""
-        successful_ids = []
+    def should_send_now(self) -> bool:
+        """Проверяем, нужно ли отправлять сейчас (31 или 01 минута часа)"""
+        now = datetime.now()
+        current_minute = now.minute
         
-        if not requests_data:
-            return successful_ids
+        # Отправляем в 31 и 01 минуту каждого часа
+        return current_minute in [1, 31]
+    
+    def get_minutes_to_next_send(self) -> int:
+        """Получаем количество минут до следующей отправки"""
+        now = datetime.now()
+        current_minute = now.minute
         
-        # Сначала отправляем сводку
-        try:
-            summary_message = self.format_summary_message(len(requests_data))
-            await self.bot.send_message(
-                chat_id=self.chat_id,
-                text=summary_message,
-                parse_mode='Markdown'
-            )
-            await asyncio.sleep(1)
-        except Exception as e:
-            logger.error(f"Ошибка при отправке сводки: {e}")
-        
-        # Затем отправляем каждую заявку
-        for request_data in requests_data:
-            success = await self.send_single_request(request_data)
-            if success:
-                successful_ids.append(request_data['id'])
-            
-            # Пауза между сообщениями, чтобы не спамить
-            await asyncio.sleep(2)
-        
-        return successful_ids
+        if current_minute < 1:
+            return 1 - current_minute
+        elif current_minute < 31:
+            return 31 - current_minute
+        else:  # После 31 минуты, ждем до 01 минуты следующего часа
+            return 61 - current_minute
