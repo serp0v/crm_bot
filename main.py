@@ -1,5 +1,7 @@
 import asyncio
 import logging
+import signal
+import sys
 from datetime import datetime
 from typing import List, Dict
 
@@ -26,7 +28,32 @@ class CRMTelegramBot:
         self.telegram_notifier = TelegramNotifier()
         self.is_running = True
         
-        logger.info("CRM Telegram Bot инициализирован (базовая версия)")
+        # Обработка сигналов для graceful shutdown
+        signal.signal(signal.SIGINT, self.signal_handler)
+        signal.signal(signal.SIGTERM, self.signal_handler)
+        
+        logger.info("CRM Telegram Bot инициализирован")
+    
+    def signal_handler(self, signum, frame):
+        """Обработка сигналов завершения"""
+        logger.info(f"Получен сигнал {signum}, останавливаю бота...")
+        self.is_running = False
+    
+    async def startup(self):
+        """Инициализация при запуске"""
+        try:
+            # Отправляем уведомление о запуске
+            await self.telegram_notifier.send_startup_notification()
+            
+            # Очистка старых записей (раз в день в 00:05)
+            now = datetime.now()
+            if now.hour == 0 and now.minute < 10:
+                self.db.cleanup_old_requests(days=1)
+                
+            return True
+        except Exception as e:
+            logger.error(f"Ошибка при старте: {e}")
+            return False
     
     async def process_requests(self) -> List[Dict]:
         """Обрабатываем заявки и возвращаем список для отправки"""
@@ -95,6 +122,11 @@ class CRMTelegramBot:
         """Основной цикл работы"""
         logger.info("Запуск основного цикла бота...")
         
+        # Запускаем инициализацию
+        if not await self.startup():
+            logger.error("Не удалось инициализировать бота")
+            return
+        
         try:
             while self.is_running:
                 # Проверяем и отправляем если нужно
@@ -102,28 +134,26 @@ class CRMTelegramBot:
                 
                 # Ждём 5 минут до следующей проверки
                 logger.info("Ожидание 5 минут до следующей проверки...")
-                await asyncio.sleep(300)  # 5 минут = 300 секунд
                 
-        except KeyboardInterrupt:
-            logger.info("Остановка по запросу пользователя")
-            self.is_running = False
+                # Ждём с проверкой флага каждые 10 секунд
+                for _ in range(30):  # 5 минут = 30 * 10 секунд
+                    if not self.is_running:
+                        break
+                    await asyncio.sleep(10)
+                
         except Exception as e:
-            logger.error(f"Критическая ошибка: {e}")
-            self.is_running = False
+            logger.error(f"Критическая ошибка: {e}", exc_info=True)
+        finally:
+            await self.shutdown()
     
-    def stop(self):
-        """Остановка бота"""
+    async def shutdown(self):
+        """Корректное завершение работы"""
+        logger.info("Завершение работы бота...")
         self.is_running = False
-        logger.info("Бот остановлен")
 
 async def main():
     bot = CRMTelegramBot()
-    try:
-        await bot.run()
-    except Exception as e:
-        logger.error(f"Фатальная ошибка: {e}")
-    finally:
-        bot.stop()
+    await bot.run()
 
 if __name__ == "__main__":
     import os
