@@ -18,8 +18,8 @@ class Config:
     TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
     
     # Интервалы работы
-    CHECK_INTERVAL_MINUTES = int(os.getenv("CHECK_INTERVAL_MINUTES", 10))
-    SEND_INTERVAL_HOURS = int(os.getenv("SEND_INTERVAL_HOURS", 1))
+    CHECK_INTERVAL_MINUTES = float(os.getenv("CHECK_INTERVAL_MINUTES", 10))
+    SEND_INTERVAL_HOURS = float(os.getenv("SEND_INTERVAL_HOURS", 1))
     
     # Параметры парсинга
     MAX_PAGES = int(os.getenv("MAX_PAGES", 5))
@@ -34,3 +34,4 @@ class Config:
         'Accept-Language': 'ru-RU,ru;q=0.9,en-US;q=0.8,en;q=0.7',
 
     }
+
