@@ -86,25 +86,21 @@ class CRMParser:
                         logger.debug(f"   Найден CSRF в другом meta: {csrf_token[:20]}...")
                         break
             
-            # Ищем форму логина и все её поля
+            # Ищем форму логина
             forms = soup.find_all('form')
             logger.info(f"   Найдено форм на странице: {len(forms)}")
             
-            for i, form in enumerate(forms):
-                logger.debug(f"   Форма #{i+1}: action='{form.get('action', '')}', method='{form.get('method', 'GET')}'")
-            
-            # Определяем, какая форма для логина (обычно содержит поля username/password)
+            # Определяем, какая форма для логина
             login_form = None
             for form in forms:
                 inputs = form.find_all('input')
                 input_names = [inp.get('name', '').lower() for inp in inputs]
-                if any('username' in name or 'login' in name for name in input_names):
+                if any('email' in name or 'username' in name or 'login' in name for name in input_names):
                     login_form = form
                     break
             
             if not login_form:
                 logger.warning("   Форма логина не найдена по стандартным признакам")
-                # Берём первую форму
                 login_form = forms[0] if forms else None
             
             # Собираем все поля формы
@@ -113,12 +109,12 @@ class CRMParser:
                 for inp in login_form.find_all('input'):
                     name = inp.get('name', '')
                     value = inp.get('value', '')
-                    if name:  # Пропускаем кнопки без name
+                    if name:
                         form_data[name] = value
                         logger.debug(f"   Поле формы: name='{name}', value='{value[:30]}...'")
             
             # ШАГ 4: Формируем данные для входа
-            # Основные поля для Yii2
+            # Используем email вместо username (как в вашей CRM)
             login_data = {
                 'LoginForm[email]': Config.CRM_LOGIN,
                 'LoginForm[password]': Config.CRM_PASSWORD,
@@ -128,12 +124,12 @@ class CRMParser:
             if csrf_token:
                 login_data['_csrf-frontend'] = csrf_token
             
-            # Добавляем остальные поля из формы (rememberMe и другие)
+            # Добавляем остальные поля из формы
             for key, value in form_data.items():
                 if key not in login_data and not key.startswith('LoginForm['):
                     login_data[key] = value
             
-            # Убедимся, что rememberMe установлен (обычно 0 или 1)
+            # Убедимся, что rememberMe установлен (в вашей форме по умолчанию checked)
             if 'LoginForm[rememberMe]' not in login_data:
                 login_data['LoginForm[rememberMe]'] = '1'
             
@@ -151,31 +147,22 @@ class CRMParser:
             logger.debug(f"   Статус после авторизации: {auth_response.status_code}")
             logger.debug(f"   Конечный URL: {auth_response.url}")
             logger.debug(f"   История редиректов: {[r.url for r in auth_response.history]}")
-            logger.debug(f"   Количество кук в сессии: {len(self.session.cookies)}")
             
             # ШАГ 6: Проверяем успешность авторизации
             if auth_response.status_code == 200:
-                # Проверяем различные признаки успешного входа
-                
-                # 1. По URL - если не на странице логина
+                # Проверяем, что мы не на странице логина
                 if "login" not in auth_response.url.lower():
                     self.is_logged_in = True
                     logger.info("✅ УСПЕШНАЯ АВТОРИЗАЦИЯ В CRM")
                     logger.info(f"   Перенаправлены на: {auth_response.url}")
-                    
-                    # Быстрая проверка доступности админки
-                    test_admin = self.session.get(f"{Config.CRM_BASE_URL}/admin", timeout=10)
-                    logger.debug(f"   Проверка доступа к /admin: {test_admin.status_code}")
-                    
                     return True
                 else:
-                    # Мы остались на странице логина - ищем ошибки
                     logger.error("❌ НЕ УДАЛОСЬ АВТОРИЗОВАТЬСЯ")
                     logger.info("   Анализируем страницу на наличие ошибок...")
                     
                     soup = BeautifulSoup(auth_response.text, 'html.parser')
                     
-                    # Ищем сообщения об ошибках (разные варианты)
+                    # Ищем сообщения об ошибках
                     error_selectors = [
                         {'class': 'help-block-error'},
                         {'class': 'error'},
@@ -196,15 +183,12 @@ class CRMParser:
                         for error in errors_found:
                             logger.error(f"   Ошибка на странице: {error}")
                     else:
-                        # Проверяем наличие полей формы (значит, форма снова показана)
                         form_count = len(soup.find_all('form'))
                         logger.info(f"   Форм на странице после отправки: {form_count}")
-                        logger.debug(f"   Первые 1000 символов ответа: {auth_response.text[:1000]}")
                     
                     return False
             else:
                 logger.error(f"   Ошибка HTTP при авторизации: {auth_response.status_code}")
-                logger.debug(f"   Тело ответа (первые 500 символов): {auth_response.text[:500]}")
                 return False
                 
         except requests.RequestException as e:
@@ -212,6 +196,26 @@ class CRMParser:
             return False
         except Exception as e:
             logger.error(f"Неожиданная ошибка при авторизации: {e}", exc_info=True)
+            return False
+    
+    def _check_urgent_request(self, row) -> bool:
+        """Проверяем, нужно ли выделить заявку желтым кружком"""
+        try:
+            # Проверяем, что строка НЕ в обработке
+            row_classes = row.get('class', [])
+            if any(cls in row_classes for cls in ['bg-is_processing_by', 'bg-is_processing_by_me']):
+                return False
+            
+            # Ищем <td> с <div class="time-warning">
+            tds = row.find_all('td')
+            for td in tds:
+                time_warning_div = td.find('div', class_='time-warning')
+                if time_warning_div:
+                    return True
+            
+            return False
+        except Exception as e:
+            logger.error(f"Ошибка при проверке срочности заявки: {e}")
             return False
     
     def get_requests_page(self, page: int = 1) -> Optional[str]:
@@ -242,7 +246,7 @@ class CRMParser:
             return None
     
     def parse_requests_from_html(self, html: str) -> List[Dict]:
-        """Парсим заявки из HTML"""
+        """Парсим заявки из HTML с учетом срочности"""
         requests_found = []
         
         try:
@@ -261,6 +265,8 @@ class CRMParser:
             for row in rows:
                 request_data = self._parse_request_row(row)
                 if request_data:
+                    # Добавляем флаг срочности
+                    request_data['is_urgent'] = self._check_urgent_request(row)
                     requests_found.append(request_data)
             
             return requests_found
@@ -338,8 +344,9 @@ class CRMParser:
         logger.info(f"Всего найдено заявок на прозвоне: {len(all_requests)}")
         
         if all_requests:
+            urgent_count = sum(1 for r in all_requests if r.get('is_urgent', False))
+            logger.info(f"Из них срочных: {urgent_count}")
             logger.debug(f"ID найденных заявок: {[r['id'] for r in all_requests]}")
         
         return all_requests
-
 
