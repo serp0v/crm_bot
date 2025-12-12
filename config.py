@@ -7,7 +7,7 @@ class Config:
     # Настройки CRM
     CRM_BASE_URL = os.getenv("CRM_BASE_URL")
     CRM_LOGIN_URL = f"{CRM_BASE_URL}/login"
-    CRM_REQUESTS_URL = f"{CRM_BASE_URL}/admin/domain/customer-request/index"
+    CRM_REQUESTS_URL = f"{CRM_BASE_URL}/admin/domain/customer-request/index?__view-mode=chats"
     
     # Данные для авторизации
     CRM_LOGIN = os.getenv("CRM_LOGIN")
@@ -32,4 +32,5 @@ class Config:
         'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
         'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
         'Accept-Language': 'ru-RU,ru;q=0.9,en-US;q=0.8,en;q=0.7',
+
     }
