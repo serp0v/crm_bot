@@ -1,5 +1,6 @@
 import asyncio
 import logging
+import socket
 from datetime import datetime
 from typing import List, Dict
 from telegram import Bot
@@ -16,20 +17,19 @@ class TelegramNotifier:
     async def send_startup_notification(self):
         """Отправляем уведомление о запуске бота"""
         try:
-            server_hostname = "Неизвестно"
-            try:
-                import socket
-                server_hostname = socket.gethostname()
-            except:
-                pass
+            # Получаем информацию о сервере
+            hostname = socket.gethostname()
+            ip_address = socket.gethostbyname(hostname)
             
             message = (
                 f"🤖 *CRM Бот запущен!*\n\n"
                 f"*Время:* {datetime.now().strftime('%d.%m.%Y %H:%M:%S')}\n"
-                f"*Сервер:* `{server_hostname}`\n"
+                f"*Сервер:* `{hostname}`\n"
+                f"*IP:* `{ip_address}`\n"
                 f"*Статус:* ✅ Работает в фоновом режиме\n"
-                f"*Режим:* Отправка в 01 и 31 минуту\n"
-                f"*Проверка:* Каждые 5 минут"
+                f"*Режим отправки:* 00:30 и 30:30 каждого часа\n"
+                f"*Проверка:* Перед каждой отправкой\n"
+                f"*Управление:* PM2 (автозапуск)"
             )
             
             await self.bot.send_message(
@@ -71,7 +71,7 @@ class TelegramNotifier:
                 chat_id=self.chat_id,
                 text=message,
                 parse_mode='Markdown',
-                disable_notification=True
+                disable_notification=True  # Без уведомлений
             )
             
             logger.info(f"Пачка #{batch_number} отправлена: {len(requests_data)} заявок")
