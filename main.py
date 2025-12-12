@@ -28,24 +28,19 @@ class CRMTelegramBot:
         
         logger.info("CRM Telegram Bot инициализирован")
     
-    async def process_requests_batch(self) -> Dict[str, List[Dict]]:
-        """Обрабатываем все найденные заявки"""
-        logger.info("Запуск проверки заявок...")
+    async def process_requests(self) -> Dict[str, List[Dict]]:
+        """Обрабатываем найденные заявки и возвращаем списки для отправки"""
+        logger.info("Запуск обработки заявок...")
         
         # Получаем заявки из CRM
         all_requests = self.crm_parser.find_all_awaiting_calls()
         
-        regular_to_send = []
-        urgent_to_send = []
+        regular_to_send = []  # Обычные заявки для отправки по расписанию
+        urgent_to_send = []   # Срочные заявки для немедленной отправки
         
-        # Обрабатываем каждую заявку
         for request_data in all_requests:
-            # Пропускаем заявки в работе
-            if request_data.get('is_processing', False):
-                continue
-            
-            # Добавляем/обновляем в базе
-            is_new_task, should_send = self.db.add_or_update_task(request_data)
+            # Определяем, нужно ли отправлять эту заявку
+            should_send = self.db.add_or_update_task(request_data)
             
             if should_send:
                 if request_data.get('is_urgent', False):
@@ -53,9 +48,8 @@ class CRMTelegramBot:
                 else:
                     regular_to_send.append(request_data)
         
-        # Очищаем старые задачи (раз в сутки)
-        if datetime.now().hour == 0 and datetime.now().minute < 5:
-            self.db.cleanup_old_tasks(hours_old=24)
+        logger.info(f"Найдено заявок: {len(all_requests)}")
+        logger.info(f"Для отправки: {len(regular_to_send)} обычных, {len(urgent_to_send)} срочных")
         
         return {
             'regular': regular_to_send,
@@ -63,26 +57,45 @@ class CRMTelegramBot:
             'all': all_requests
         }
     
-    async def send_batch_if_needed(self, requests_data: Dict[str, List[Dict]]):
-        """Отправляем пачки если нужно"""
+    async def send_requests(self, requests_data: Dict[str, List[Dict]]):
+        """Отправляем заявки согласно логике"""
+        current_time = datetime.now()
+        current_minute = current_time.minute
         
-        # Всегда отправляем срочные заявки
+        # Определяем время отправки
+        send_minutes = [1, 5, 11, 16, 21, 26, 31]
+        should_send_scheduled = current_minute in send_minutes
+        
+        logger.info(f"Текущее время: {current_time.strftime('%H:%M')} (минута: {current_minute})")
+        logger.info(f"Время отправки по расписанию: {should_send_scheduled}")
+        
+        # ВСЕГДА отправляем срочные заявки (но только если они есть)
         if requests_data['urgent']:
-            logger.info(f"Найдено {len(requests_data['urgent'])} срочных заявок")
+            logger.info(f"Отправка {len(requests_data['urgent'])} срочных заявок")
             batch_number = self.db.get_next_batch_number()
             
-            if await self.telegram_notifier.send_batch(requests_data['urgent'], batch_number, is_urgent_only=True):
-                # Отмечаем как отправленные
+            success = await self.telegram_notifier.send_batch(
+                requests_data['urgent'], 
+                batch_number, 
+                is_urgent=True
+            )
+            
+            if success:
                 for req in requests_data['urgent']:
                     self.db.mark_as_sent(req['id'], req.get('scheduled_time', ''), batch_number)
         
-        # Проверяем время для обычных пачек
-        if self.telegram_notifier.should_send_now() and requests_data['regular']:
-            logger.info(f"Время отправки! Найдено {len(requests_data['regular'])} обычных заявок")
+        # Обычные заявки отправляем только по расписанию
+        if should_send_scheduled and requests_data['regular']:
+            logger.info(f"Отправка {len(requests_data['regular'])} обычных заявок по расписанию")
             batch_number = self.db.get_next_batch_number()
             
-            if await self.telegram_notifier.send_batch(requests_data['regular'], batch_number):
-                # Отмечаем как отправленные
+            success = await self.telegram_notifier.send_batch(
+                requests_data['regular'], 
+                batch_number, 
+                is_urgent=False
+            )
+            
+            if success:
                 for req in requests_data['regular']:
                     self.db.mark_as_sent(req['id'], req.get('scheduled_time', ''), batch_number)
     
@@ -93,17 +106,14 @@ class CRMTelegramBot:
         try:
             while self.is_running:
                 # Обрабатываем заявки
-                requests_data = await self.process_requests_batch()
+                requests_data = await self.process_requests()
                 
                 # Отправляем если нужно
-                await self.send_batch_if_needed(requests_data)
+                await self.send_requests(requests_data)
                 
-                # Ждем до следующей проверки
-                wait_minutes = self.telegram_notifier.get_minutes_to_next_send()
-                wait_minutes = min(wait_minutes, 1)  # Не больше 5 минут
-                
-                logger.info(f"Следующая проверка через {wait_minutes} минут")
-                await asyncio.sleep(wait_minutes * 60)
+                # Ждём 1 минуту до следующей проверки
+                logger.info("Ожидание 1 минуту до следующей проверки...")
+                await asyncio.sleep(60)
                 
         except KeyboardInterrupt:
             logger.info("Остановка по запросу пользователя")
@@ -130,4 +140,3 @@ if __name__ == "__main__":
     import os
     os.makedirs("logs", exist_ok=True)
     asyncio.run(main())
-
