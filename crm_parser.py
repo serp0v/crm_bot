@@ -120,7 +120,7 @@ class CRMParser:
             # ШАГ 4: Формируем данные для входа
             # Основные поля для Yii2
             login_data = {
-                'LoginForm[username]': Config.CRM_LOGIN,
+                'LoginForm[email]': Config.CRM_LOGIN,
                 'LoginForm[password]': Config.CRM_PASSWORD,
             }
             
@@ -341,3 +341,4 @@ class CRMParser:
             logger.debug(f"ID найденных заявок: {[r['id'] for r in all_requests]}")
         
         return all_requests
+
