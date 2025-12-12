@@ -13,33 +13,24 @@ class TelegramNotifier:
         self.bot = Bot(token=Config.TELEGRAM_BOT_TOKEN)
         self.chat_id = Config.TELEGRAM_CHAT_ID
     
-    async def send_batch(self, requests_data: List[Dict], batch_number: int, is_urgent: bool = False) -> bool:
+    async def send_batch(self, requests_data: List[Dict], batch_number: int) -> bool:
         """Отправляем пачку заявок"""
         if not requests_data:
+            logger.info("Нет заявок для отправки")
             return False
         
         try:
-            # Формируем заголовок
-            if is_urgent:
-                batch_title = f"🚨 СРОЧНЫЕ #{batch_number}"
-            else:
-                batch_title = f"#{batch_number}"
-            
             # Формируем сообщение
-            message_lines = [batch_title, ""]
+            message_lines = [f"#{batch_number}", ""]
             
             for request_data in requests_data:
                 request_id = request_data['id']
                 scheduled_time = request_data.get('scheduled_time', '')
                 
-                # Временное отключение жёлтых пометок (по просьбе пользователя)
-                # prefix = "🟡" if is_urgent else ""
-                prefix = ""
-                
                 if scheduled_time:
-                    message_lines.append(f"{prefix}`{request_id}` ({scheduled_time})")
+                    message_lines.append(f"`{request_id}` ({scheduled_time})")
                 else:
-                    message_lines.append(f"{prefix}`{request_id}`")
+                    message_lines.append(f"`{request_id}`")
             
             message = "\n".join(message_lines)
             
@@ -48,11 +39,10 @@ class TelegramNotifier:
                 chat_id=self.chat_id,
                 text=message,
                 parse_mode='Markdown',
-                disable_notification=not is_urgent  # Уведомления только для срочных
+                disable_notification=True  # Без уведомлений (спокойные отправки)
             )
             
             logger.info(f"Пачка #{batch_number} отправлена: {len(requests_data)} заявок")
-            await asyncio.sleep(0.5)  # Небольшая пауза
             return True
             
         except TelegramError as e:
