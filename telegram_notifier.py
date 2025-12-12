@@ -68,8 +68,7 @@ class TelegramNotifier:
     def should_send_now(self) -> bool:
         """Проверяем, нужно ли отправлять сейчас (31 или 01 минута часа)"""
         now = datetime.now()
-        #return now.minute in [1, 31]
-        return now.minute in [1, 5, 11, 16, 21, 26, 31, 36, 41, 46, 51, 56]
+        return now.minute in [1, 31]
     
     def get_minutes_to_next_send(self) -> int:
         """Минуты до следующей отправки"""
@@ -82,5 +81,6 @@ class TelegramNotifier:
             return 31 - current_minute
         else:
             return 61 - current_minute
+
 
 
