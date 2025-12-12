@@ -1,7 +1,8 @@
 import sqlite3
 import logging
+import json
 from datetime import datetime
-from typing import List, Optional
+from typing import List, Dict, Optional, Tuple
 from config import Config
 
 logger = logging.getLogger(__name__)
@@ -12,155 +13,194 @@ class Database:
         self.init_db()
     
     def init_db(self):
-        """Инициализация базы данных"""
+        """Инициализация базы данных с новой структурой"""
         conn = sqlite3.connect(self.db_path)
         cursor = conn.cursor()
         
-        # Таблица для отслеживания заявок
+        # Удаляем старые таблицы, чтобы избежать конфликтов
+        cursor.execute('DROP TABLE IF EXISTS requests')
+        cursor.execute('DROP TABLE IF EXISTS batch_counter')
+        
+        # Основная таблица для задач прозвона (ID + scheduled_time)
         cursor.execute('''
-            CREATE TABLE IF NOT EXISTS requests (
+            CREATE TABLE IF NOT EXISTS call_tasks (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
-                request_id INTEGER UNIQUE,
+                request_id INTEGER NOT NULL,
+                scheduled_time TEXT NOT NULL,
                 data TEXT,
-                found_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                sent_at TIMESTAMP NULL,
-                batch_number INTEGER NULL,
-                is_urgent BOOLEAN DEFAULT 0
+                first_seen_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                last_seen_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                last_sent_at TIMESTAMP NULL,
+                is_urgent BOOLEAN DEFAULT 0,
+                is_processing BOOLEAN DEFAULT 0,
+                batch_numbers TEXT,
+                UNIQUE(request_id, scheduled_time)
             )
         ''')
         
         # Таблица для счетчика пачек
         cursor.execute('''
             CREATE TABLE IF NOT EXISTS batch_counter (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                id INTEGER PRIMARY KEY DEFAULT 1,
                 last_batch_number INTEGER DEFAULT 0,
                 updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
             )
         ''')
+        cursor.execute('INSERT OR IGNORE INTO batch_counter (id) VALUES (1)')
         
-        # Инициализируем счетчик если он пустой
-        cursor.execute('INSERT OR IGNORE INTO batch_counter (id, last_batch_number) VALUES (1, 0)')
-        
-        # Индексы для быстрого поиска
+        # Индексы
         cursor.execute('''
-            CREATE INDEX IF NOT EXISTS idx_request_id 
-            ON requests(request_id)
+            CREATE INDEX IF NOT EXISTS idx_tasks_composite 
+            ON call_tasks(request_id, scheduled_time)
         ''')
-        
         cursor.execute('''
-            CREATE INDEX IF NOT EXISTS idx_sent_at 
-            ON requests(sent_at)
+            CREATE INDEX IF NOT EXISTS idx_tasks_urgent 
+            ON call_tasks(is_urgent, last_sent_at)
         ''')
         
         conn.commit()
         conn.close()
-        logger.info("База данных инициализирована")
+        logger.info("Новая структура базы данных инициализирована")
     
     def get_next_batch_number(self) -> int:
         """Получаем следующий номер пачки"""
         conn = sqlite3.connect(self.db_path)
         cursor = conn.cursor()
         
-        try:
-            cursor.execute('UPDATE batch_counter SET last_batch_number = last_batch_number + 1 WHERE id = 1')
-            cursor.execute('SELECT last_batch_number FROM batch_counter WHERE id = 1')
+        cursor.execute('''
+            UPDATE batch_counter 
+            SET last_batch_number = last_batch_number + 1,
+                updated_at = CURRENT_TIMESTAMP 
+            WHERE id = 1
+        ''')
+        cursor.execute('SELECT last_batch_number FROM batch_counter WHERE id = 1')
+        batch_number = cursor.fetchone()[0]
+        
+        conn.commit()
+        conn.close()
+        return batch_number
+    
+    def get_task(self, request_id: int, scheduled_time: str) -> Optional[Tuple]:
+        """Получаем задачу по ID и времени"""
+        conn = sqlite3.connect(self.db_path)
+        cursor = conn.cursor()
+        
+        cursor.execute('''
+            SELECT id, last_sent_at, is_urgent, is_processing
+            FROM call_tasks 
+            WHERE request_id = ? AND scheduled_time = ?
+        ''', (request_id, scheduled_time))
+        
+        result = cursor.fetchone()
+        conn.close()
+        return result
+    
+    def add_or_update_task(self, request_data: Dict) -> Tuple[bool, bool]:
+        """
+        Добавляем или обновляем задачу
+        Возвращает (is_new_task, should_send)
+        """
+        request_id = request_data['id']
+        scheduled_time = request_data.get('scheduled_time', '')
+        is_urgent = request_data.get('is_urgent', False)
+        is_processing = request_data.get('is_processing', False)
+        data_json = json.dumps(request_data, ensure_ascii=False, default=str)
+        
+        conn = sqlite3.connect(self.db_path)
+        cursor = conn.cursor()
+        
+        # Проверяем существование задачи
+        existing = self.get_task(request_id, scheduled_time)
+        
+        if not existing:
+            # Новая задача
+            cursor.execute('''
+                INSERT INTO call_tasks 
+                (request_id, scheduled_time, data, is_urgent, is_processing, last_seen_at)
+                VALUES (?, ?, ?, ?, ?, ?)
+            ''', (request_id, scheduled_time, data_json, is_urgent, is_processing, datetime.now()))
             
-            batch_number = cursor.fetchone()[0]
             conn.commit()
-            logger.debug(f"Получен номер пачки: {batch_number}")
-            return batch_number
-        except Exception as e:
-            logger.error(f"Ошибка при получении номера пачки: {e}")
-            return 1
-        finally:
             conn.close()
+            return True, True  # Новая задача, отправляем
+        
+        # Задача существует, обновляем
+        task_id, last_sent_at, was_urgent, was_processing = existing
+        
+        # Обновляем время последнего просмотра
+        cursor.execute('''
+            UPDATE call_tasks 
+            SET last_seen_at = ?,
+                is_urgent = ?,
+                is_processing = ?,
+                data = ?
+            WHERE id = ?
+        ''', (datetime.now(), is_urgent, is_processing, data_json, task_id))
+        
+        conn.commit()
+        conn.close()
+        
+        # Определяем, нужно ли отправлять
+        should_send = False
+        
+        # 1. Если заявка стала срочной (а не была)
+        if is_urgent and not was_urgent:
+            should_send = True
+        
+        # 2. Если заявка не в работе и не отправлялась >30 минут
+        elif not is_processing and last_sent_at:
+            last_sent = datetime.fromisoformat(last_sent_at.replace('Z', '+00:00')) if isinstance(last_sent_at, str) else last_sent_at
+            minutes_passed = (datetime.now() - last_sent).total_seconds() / 60
+            
+            if minutes_passed > 30:
+                should_send = True
+        
+        return False, should_send  # Не новая задача, отправляем по условиям
     
-    def add_request(self, request_id: int, data: str, is_urgent: bool = False) -> bool:
-        """Добавляем новую заявку в БД"""
+    def mark_as_sent(self, request_id: int, scheduled_time: str, batch_number: int):
+        """Отмечаем задачу как отправленную"""
         conn = sqlite3.connect(self.db_path)
         cursor = conn.cursor()
         
-        try:
-            cursor.execute(
-                """INSERT OR IGNORE INTO requests 
-                   (request_id, data, found_at, is_urgent) 
-                   VALUES (?, ?, ?, ?)""",
-                (request_id, data, datetime.now(), is_urgent)
-            )
-            conn.commit()
-            added = cursor.rowcount > 0
-            if added:
-                logger.info(f"Заявка {request_id} добавлена в БД (срочная: {is_urgent})")
-            return added
-        except Exception as e:
-            logger.error(f"Ошибка при добавлении заявки {request_id}: {e}")
-            return False
-        finally:
-            conn.close()
+        # Получаем текущие номера пачек
+        cursor.execute('''
+            SELECT batch_numbers FROM call_tasks 
+            WHERE request_id = ? AND scheduled_time = ?
+        ''', (request_id, scheduled_time))
+        
+        result = cursor.fetchone()
+        current_batches = result[0] if result and result[0] else ""
+        
+        # Добавляем новый номер пачки
+        if current_batches:
+            new_batches = f"{current_batches},{batch_number}"
+        else:
+            new_batches = str(batch_number)
+        
+        # Обновляем запись
+        cursor.execute('''
+            UPDATE call_tasks 
+            SET last_sent_at = ?,
+                batch_numbers = ?
+            WHERE request_id = ? AND scheduled_time = ?
+        ''', (datetime.now(), new_batches, request_id, scheduled_time))
+        
+        conn.commit()
+        conn.close()
     
-    def get_unsent_requests(self) -> List[tuple]:
-        """Получаем все неотправленные заявки"""
+    def cleanup_old_tasks(self, hours_old: int = 24):
+        """Очищаем старые задачи (> hours_old часов)"""
         conn = sqlite3.connect(self.db_path)
         cursor = conn.cursor()
         
-        try:
-            cursor.execute(
-                """SELECT request_id, data, is_urgent FROM requests 
-                   WHERE sent_at IS NULL 
-                   ORDER BY found_at"""
-            )
-            return cursor.fetchall()
-        except Exception as e:
-            logger.error(f"Ошибка при получении неотправленных заявок: {e}")
-            return []
-        finally:
-            conn.close()
-    
-    def mark_as_sent(self, request_ids: List[int], batch_number: int):
-        """Отмечаем заявки как отправленные с номером пачки"""
-        if not request_ids:
-            return
+        cursor.execute('''
+            DELETE FROM call_tasks 
+            WHERE last_seen_at < datetime('now', ?)
+        ''', (f'-{hours_old} hours',))
         
-        conn = sqlite3.connect(self.db_path)
-        cursor = conn.cursor()
+        deleted = cursor.rowcount
+        conn.commit()
+        conn.close()
         
-        try:
-            placeholders = ','.join('?' for _ in request_ids)
-            query = f"""
-                UPDATE requests 
-                SET sent_at = ?, batch_number = ?
-                WHERE request_id IN ({placeholders})
-            """
-            cursor.execute(query, [datetime.now(), batch_number] + request_ids)
-            conn.commit()
-            logger.info(f"Отмечено как отправлено в пачке #{batch_number}: {len(request_ids)} заявок")
-        except Exception as e:
-            logger.error(f"Ошибка при обновлении статуса: {e}")
-        finally:
-            conn.close()
-    
-    def request_exists(self, request_id: int) -> bool:
-        """Проверяем, существует ли заявка в БД"""
-        conn = sqlite3.connect(self.db_path)
-        cursor = conn.cursor()
-        
-        try:
-            cursor.execute(
-                "SELECT 1 FROM requests WHERE request_id = ?",
-                (request_id,)
-            )
-            return cursor.fetchone() is not None
-        finally:
-            conn.close()
-    
-    def get_last_batch_number(self) -> int:
-        """Получаем последний номер пачки"""
-        conn = sqlite3.connect(self.db_path)
-        cursor = conn.cursor()
-        
-        try:
-            cursor.execute('SELECT last_batch_number FROM batch_counter WHERE id = 1')
-            result = cursor.fetchone()
-            return result[0] if result else 0
-        finally:
-            conn.close()
+        if deleted:
+            logger.info(f"Очищено {deleted} старых задач (> {hours_old} часов)")
