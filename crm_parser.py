@@ -13,64 +13,74 @@ class CRMParser:
         self.is_logged_in = False
     
     def login(self) -> bool:
-        """Авторизация в CRM"""
-        try:
-            logger.info("Попытка авторизации в CRM...")
-            
-            # 1. Получаем страницу логина (если нужен CSRF токен)
-            response = self.session.get(Config.CRM_LOGIN_URL, timeout=30)
-            
-            # 2. Парсим форму логина (адаптируйте под вашу CRM)
-            soup = BeautifulSoup(response.text, 'html.parser')
-            
-            # Ищем CSRF токен если он есть
-            csrf_token = ""
-            csrf_input = soup.find('input', {'name': '_csrf'}) or \
-                        soup.find('input', {'name': 'csrf_token'}) or \
-                        soup.find('input', {'name': 'YII_CSRF_TOKEN'})
-            
-            if csrf_input:
-                csrf_token = csrf_input.get('value', '')
-            
-            # 3. Формируем данные для входа
-            login_data = {
-                'login': Config.CRM_LOGIN,
-                'password': Config.CRM_PASSWORD,
-            }
-            
-            if csrf_token:
-                login_data['_csrf'] = csrf_token
-                login_data['csrf_token'] = csrf_token
-                login_data['YII_CSRF_TOKEN'] = csrf_token
-            
-            # 4. Отправляем запрос на авторизацию
-            response = self.session.post(
-                Config.CRM_LOGIN_URL,
-                data=login_data,
-                allow_redirects=True,
-                timeout=30
-            )
-            
-            # 5. Проверяем успешность авторизации
-            if response.status_code == 200:
-                # Проверяем, что мы на нужной странице (не на странице логина)
-                if "login" not in response.url.lower():
-                    self.is_logged_in = True
-                    logger.info("Успешная авторизация в CRM")
-                    return True
+    """Авторизация в Yii2 CRM"""
+    try:
+        logger.info("Попытка авторизации в CRM...")
+        
+        # 1. Получаем страницу логина для CSRF-токена
+        login_url = f"{Config.CRM_BASE_URL}/admin/login"
+        response = self.session.get(login_url, timeout=30)
+        
+        if response.status_code != 200:
+            logger.error(f"Ошибка загрузки страницы логина: {response.status_code}")
+            return False
+        
+        # 2. Ищем CSRF-токен (Yii2 обычно в meta-теге или input)
+        soup = BeautifulSoup(response.text, 'html.parser')
+        
+        # Вариант 1: Ищем в meta-теге
+        csrf_meta = soup.find('meta', {'name': 'csrf-token'})
+        # Вариант 2: Ищем в input
+        csrf_input = soup.find('input', {'name': '_csrf-frontend'})
+        
+        csrf_token = ""
+        if csrf_meta:
+            csrf_token = csrf_meta.get('content', '')
+        elif csrf_input:
+            csrf_token = csrf_input.get('value', '')
+        
+        if not csrf_token:
+            logger.warning("CSRF-токен не найден, пробуем без него")
+        
+        # 3. Формируем данные для входа
+        login_data = {
+            'LoginForm[username]': Config.CRM_LOGIN,
+            'LoginForm[password]': Config.CRM_PASSWORD,
+            '_csrf-frontend': csrf_token,
+            'LoginForm[rememberMe]': '0',  # Обычно в Yii2 есть этот параметр
+        }
+        
+        # 4. Отправляем запрос на авторизацию
+        response = self.session.post(
+            login_url,
+            data=login_data,
+            allow_redirects=True,
+            timeout=30
+        )
+        
+        # 5. Проверяем успешность по редиректу или содержимому
+        if response.status_code == 200:
+            # Проверяем, что мы не на странице логина
+            if "login" not in response.url.lower():
+                self.is_logged_in = True
+                logger.info("Успешная авторизация в CRM")
+                return True
+            else:
+                # Пробуем найти ошибку на странице
+                soup = BeautifulSoup(response.text, 'html.parser')
+                error_div = soup.find('div', class_='help-block-error')
+                if error_div:
+                    logger.error(f"Ошибка авторизации: {error_div.get_text(strip=True)}")
                 else:
                     logger.error("Не удалось авторизоваться - остались на странице логина")
-                    return False
-            else:
-                logger.error(f"Ошибка HTTP при авторизации: {response.status_code}")
                 return False
-                
-        except requests.RequestException as e:
-            logger.error(f"Сетевая ошибка при авторизации: {e}")
+        else:
+            logger.error(f"Ошибка HTTP при авторизации: {response.status_code}")
             return False
-        except Exception as e:
-            logger.error(f"Неожиданная ошибка при авторизации: {e}")
-            return False
+            
+    except Exception as e:
+        logger.error(f"Неожиданная ошибка при авторизации: {e}")
+        return False
     
     def get_requests_page(self, page: int = 1) -> Optional[str]:
         """Получаем HTML страницу с заявками"""
@@ -177,4 +187,5 @@ class CRMParser:
                 break
         
         logger.info(f"Всего найдено заявок на прозвоне: {len(all_requests)}")
+
         return all_requests
