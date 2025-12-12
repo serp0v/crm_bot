@@ -13,6 +13,38 @@ class TelegramNotifier:
         self.bot = Bot(token=Config.TELEGRAM_BOT_TOKEN)
         self.chat_id = Config.TELEGRAM_CHAT_ID
     
+    async def send_startup_notification(self):
+        """Отправляем уведомление о запуске бота"""
+        try:
+            server_hostname = "Неизвестно"
+            try:
+                import socket
+                server_hostname = socket.gethostname()
+            except:
+                pass
+            
+            message = (
+                f"🤖 *CRM Бот запущен!*\n\n"
+                f"*Время:* {datetime.now().strftime('%d.%m.%Y %H:%M:%S')}\n"
+                f"*Сервер:* `{server_hostname}`\n"
+                f"*Статус:* ✅ Работает в фоновом режиме\n"
+                f"*Режим:* Отправка в 01 и 31 минуту\n"
+                f"*Проверка:* Каждые 5 минут"
+            )
+            
+            await self.bot.send_message(
+                chat_id=self.chat_id,
+                text=message,
+                parse_mode='Markdown',
+                disable_notification=False
+            )
+            logger.info("Уведомление о запуске отправлено в Telegram")
+            return True
+            
+        except Exception as e:
+            logger.error(f"Ошибка отправки уведомления о запуске: {e}")
+            return False
+    
     async def send_batch(self, requests_data: List[Dict], batch_number: int) -> bool:
         """Отправляем пачку заявок"""
         if not requests_data:
@@ -39,7 +71,7 @@ class TelegramNotifier:
                 chat_id=self.chat_id,
                 text=message,
                 parse_mode='Markdown',
-                disable_notification=True  # Без уведомлений (спокойные отправки)
+                disable_notification=True
             )
             
             logger.info(f"Пачка #{batch_number} отправлена: {len(requests_data)} заявок")
