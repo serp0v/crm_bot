@@ -135,7 +135,7 @@ class CRMParser:
             
             # Убедимся, что rememberMe установлен (обычно 0 или 1)
             if 'LoginForm[rememberMe]' not in login_data:
-                login_data['LoginForm[rememberMe]'] = '0'
+                login_data['LoginForm[rememberMe]'] = '1'
             
             logger.info(f"4. Отправляем данные авторизации на {login_url}")
             logger.debug(f"   Данные для отправки: { {k: '***' if 'password' in k else v for k, v in login_data.items()} }")
@@ -341,4 +341,5 @@ class CRMParser:
             logger.debug(f"ID найденных заявок: {[r['id'] for r in all_requests]}")
         
         return all_requests
+
 
