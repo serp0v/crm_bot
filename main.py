@@ -100,7 +100,7 @@ class CRMTelegramBot:
                 
                 # Ждем до следующей проверки
                 wait_minutes = self.telegram_notifier.get_minutes_to_next_send()
-                wait_minutes = min(wait_minutes, 5)  # Не больше 5 минут
+                wait_minutes = min(wait_minutes, 1)  # Не больше 5 минут
                 
                 logger.info(f"Следующая проверка через {wait_minutes} минут")
                 await asyncio.sleep(wait_minutes * 60)
@@ -130,3 +130,4 @@ if __name__ == "__main__":
     import os
     os.makedirs("logs", exist_ok=True)
     asyncio.run(main())
+
