@@ -131,3 +131,44 @@ class Database:
         
         if deleted:
             logger.info(f"Очищено {deleted} старых записей (> {days} дней)")
+
+    def get_hourly_sent_counts_last_24h(self, tz_offset_hours: int = 10) -> Dict[int, int]:
+        """Возвращает словарь {hour: count} для последних 24 часов в часовом поясе с указанным смещением.
+
+        Час возвращается в диапазоне 0-23 локального времени (tz_offset_hours).
+        Время в БД хранится в формате UTC (SQLite CURRENT_TIMESTAMP -> UTC), поэтому
+        мы выбираем записи за последние 24 часа по UTC и затем смещаем их на tz_offset.
+        """
+        conn = sqlite3.connect(self.db_path)
+        cursor = conn.cursor()
+
+        # Определяем порог UTC (24 часа назад)
+        now_utc = datetime.utcnow()
+        start_utc = now_utc - datetime.timedelta(hours=24) if False else None
+        # We will compute start_utc properly without relying on datetime.timedelta import
+        from datetime import timedelta
+        start_utc = now_utc - timedelta(hours=24)
+
+        cursor.execute('''
+            SELECT last_sent_at FROM requests
+            WHERE last_sent_at IS NOT NULL
+            AND last_sent_at >= ?
+        ''', (start_utc.strftime('%Y-%m-%d %H:%M:%S'),))
+
+        rows = cursor.fetchall()
+        conn.close()
+
+        # Initialize counts for 0..23
+        counts = {h: 0 for h in range(24)}
+
+        for (last_sent_at_str,) in rows:
+            try:
+                ts = datetime.strptime(last_sent_at_str, '%Y-%m-%d %H:%M:%S')
+                # ts is in UTC; convert to local by adding offset
+                local_ts = ts + timedelta(hours=tz_offset_hours)
+                hour = local_ts.hour
+                counts[hour] = counts.get(hour, 0) + 1
+            except Exception:
+                continue
+
+        return counts
