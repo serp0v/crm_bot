@@ -114,6 +114,39 @@ class Database:
         conn.commit()
         conn.close()
         logger.debug(f"Заявка {request_id} отмечена как отправленная в пачке #{batch_number}")
+
+    # Compatibility helpers for tests
+    def add_request(self, request_id: int, payload: str) -> bool:
+        """Compatibility wrapper used by `test.py`.
+
+        Inserts a request row if it does not exist. `payload` is stored in `scheduled_time` column
+        for compatibility with the simplified schema used in tests.
+        Returns True if inserted, False if already existed.
+        """
+        conn = sqlite3.connect(self.db_path)
+        cursor = conn.cursor()
+
+        cursor.execute('SELECT 1 FROM requests WHERE request_id = ?', (request_id,))
+        exists = cursor.fetchone() is not None
+
+        if not exists:
+            cursor.execute(
+                'INSERT INTO requests (request_id, scheduled_time) VALUES (?, ?)',
+                (request_id, payload or '')
+            )
+            conn.commit()
+
+        conn.close()
+        return not exists
+
+    def request_exists(self, request_id: int) -> bool:
+        """Возвращает True если заявка с таким request_id есть в базе."""
+        conn = sqlite3.connect(self.db_path)
+        cursor = conn.cursor()
+        cursor.execute('SELECT 1 FROM requests WHERE request_id = ?', (request_id,))
+        exists = cursor.fetchone() is not None
+        conn.close()
+        return exists
     
     def cleanup_old_requests(self, days: int = 1):
         """Очищаем старые записи"""
