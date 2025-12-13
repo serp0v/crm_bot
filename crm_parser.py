@@ -3,6 +3,7 @@ import logging
 import re
 from typing import List, Dict, Optional
 from bs4 import BeautifulSoup
+from datetime import datetime, timedelta
 from config import Config
 
 logger = logging.getLogger(__name__)
@@ -59,28 +60,105 @@ class CRMParser:
             logger.error(f"Ошибка при авторизации: {e}")
             return False
     
-    def extract_scheduled_time(self, cell) -> str:
+    def _get_utc_offset_for_city(self, city: str) -> Optional[int]:
+        """Возвращает смещение в часах от UTC для города/региона внутри России.
+
+        Если город не опознан — возвращает None.
+        """
+        if not city:
+            return None
+
+        name = city.strip().lower()
+
+        # Простейшая таблица соответствий (можно расширять по необходимости)
+        mapping = {
+            # Калининград
+            'калининград': 2,
+            # Москва и запад/центр
+            'москва': 3,
+            'московская область': 3,
+            # Самара
+            'самара': 4,
+            # Екатеринбург
+            'екатеринбург': 5,
+            'свердловская область': 5,
+            # Омск
+            'омск': 6,
+            # Красноярск
+            'красноярск': 7,
+            # Иркутск
+            'иркутск': 8,
+            # Якутск
+            'якутск': 9,
+            # Владивосток
+            'владивосток': 10,
+            # Магадан
+            'магадан': 11,
+            # Петропавловск-Камчатский
+            'петропавловск-камчатский': 12,
+        }
+
+        # Попытка точного совпадения
+        for k, v in mapping.items():
+            if k in name:
+                return v
+
+        return None
+
+    def _convert_utc_to_local(self, time_str: str, offset_hours: Optional[int]) -> str:
+        """Конвертирует время-строку `HH:MM` из UTC в локальное время, добавляя `offset_hours`.
+
+        Если offset_hours is None — возвращает исходную строк.
+        """
+        if offset_hours is None:
+            return time_str
+
+        try:
+            match = re.search(r'(\d{1,2}):(\d{2})', time_str)
+            if not match:
+                return time_str
+
+            hour = int(match.group(1))
+            minute = int(match.group(2))
+
+            time_obj = datetime.strptime(f"{hour:02d}:{minute:02d}", "%H:%M")
+            time_obj += timedelta(hours=offset_hours)
+
+            return time_obj.strftime("%H:%M")
+        except Exception as e:
+            logger.error(f"Ошибка конверсии времени '{time_str}': {e}")
+            return time_str
+    
+    def extract_scheduled_time(self, cell, city: Optional[str] = None) -> str:
         """Извлекаем запланированное время из ячейки"""
         if not cell:
             return ""
-        
-        # Пытаемся извлечь из title атрибута
+        # Сначала пытаемся взять видимое время (то, что видит пользователь)
         time_span = cell.find('span')
+        if time_span:
+            text = time_span.get_text(strip=True)
+            # Ищем дату и время в видимом тексте: "12.12.25 19:00" -> вернём только 19:00
+            match = re.search(r'\d{2}\.\d{2}\.\d{2}\s+(\d{1,2}:\d{2})', text)
+            if match:
+                return match.group(1)
+
+        # Если видимого времени нет, смотрим в title (например: "Назначено в: 16:00(UTC)")
         if time_span and time_span.get('title'):
             title = time_span['title']
             # Ищем время в формате "Назначено в: 08:00"
             match = re.search(r'Назначено в:\s*(\d{1,2}:\d{2})', title)
             if match:
-                return match.group(1)
-        
-        # Если в title нет, берем текст span
+                time_str = match.group(1)
+                offset = self._get_utc_offset_for_city(city or "")
+                return self._convert_utc_to_local(time_str, offset)
+
+        # Ещё попытка: найти любое время в тексте span
         if time_span:
             text = time_span.get_text(strip=True)
-            # Ищем дату и время в тексте
-            match = re.search(r'\d{2}\.\d{2}\.\d{2}\s+\d{1,2}:\d{2}', text)
+            match = re.search(r'(\d{1,2}:\d{2})', text)
             if match:
-                return match.group(0)
-        
+                return match.group(1)
+
         return cell.get_text(strip=True)
     
     def parse_requests_from_html(self, html: str) -> List[Dict]:
@@ -120,10 +198,13 @@ class CRMParser:
             # Все ячейки
             cells = row.find_all('td')
             
-            # Запланированное время (вторая ячейка)
+            # Город (пятая ячейка) — используем его для определения часового пояса
+            city_text = cells[4].get_text(strip=True) if len(cells) > 4 else ""
+
+            # Запланированное время (вторая ячейка) — передаём город для корректной конверсии
             scheduled_time = ""
             if len(cells) > 1:
-                scheduled_time = self.extract_scheduled_time(cells[1])
+                scheduled_time = self.extract_scheduled_time(cells[1], city_text)
             
             # Проверка срочности (time-warning)
             is_urgent = False
@@ -145,7 +226,7 @@ class CRMParser:
                 'is_processing': is_processing,
                 'date': cells[1].get_text(strip=True) if len(cells) > 1 else "",
                 'type': cells[2].get_text(strip=True) if len(cells) > 2 else "",
-                'city': cells[4].get_text(strip=True) if len(cells) > 4 else "",
+                'city': city_text,
                 'url': f"{Config.CRM_BASE_URL}{link['href']}"
             }
             
