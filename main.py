@@ -26,6 +26,7 @@ class CRMTelegramBot:
         self.db = Database()
         self.crm_parser = CRMParser()
         self.telegram_notifier = TelegramNotifier()
+        self.daily_stats_task = None
         self.is_running = True
         
         # Обработка сигналов
@@ -49,6 +50,9 @@ class CRMTelegramBot:
             now = datetime.now()
             if now.hour == 0 and now.minute < 10:
                 self.db.cleanup_old_requests(days=1)
+
+            # Запускаем таск ежедневной отправки статистики (08:00 по Владивостоку)
+            self.daily_stats_task = asyncio.create_task(self.daily_stats_loop())
                 
             return True
         except Exception as e:
@@ -216,6 +220,53 @@ class CRMTelegramBot:
         """Корректное завершение работы"""
         logger.info("Завершение работы бота...")
         self.is_running = False
+        # Завершаем таск ежедневной отправки
+        if self.daily_stats_task and not self.daily_stats_task.done():
+            self.daily_stats_task.cancel()
+            try:
+                await self.daily_stats_task
+            except asyncio.CancelledError:
+                pass
+
+    async def daily_stats_loop(self):
+        """Цикл, отправляющий статистику раз в сутки в 08:00 по Владивостоку (UTC+10)."""
+        tz_offset = 10  # Владивосток UTC+10
+        while self.is_running:
+            try:
+                # Текущее время в UTC и в локале Владивостока
+                now_utc = datetime.utcnow()
+                now_vl = now_utc + timedelta(hours=tz_offset)
+
+                # Цель — следующий 08:00 по Владивостоку
+                target_vl = now_vl.replace(hour=8, minute=0, second=0, microsecond=0)
+                if now_vl >= target_vl:
+                    target_vl = target_vl + timedelta(days=1)
+
+                # Переводим цель в UTC и ждём
+                target_utc = target_vl - timedelta(hours=tz_offset)
+                sleep_seconds = (target_utc - now_utc).total_seconds()
+
+                logger.info(f"Ожидание {sleep_seconds:.0f}s до следующей отправки ежедневной статистики ({target_vl.strftime('%Y-%m-%d %H:%M:%S')} VL)")
+
+                # Спим с проверкой флага каждые 30 секунд
+                while sleep_seconds > 0 and self.is_running:
+                    to_sleep = min(30, sleep_seconds)
+                    await asyncio.sleep(to_sleep)
+                    sleep_seconds -= to_sleep
+
+                if not self.is_running:
+                    break
+
+                # Собираем статистику и отправляем
+                counts = self.db.get_hourly_sent_counts_last_24h(tz_offset_hours=tz_offset)
+                await self.telegram_notifier.send_daily_stats(counts, tz_name='Владивосток')
+
+            except asyncio.CancelledError:
+                break
+            except Exception as e:
+                logger.error(f"Ошибка в daily_stats_loop: {e}")
+                # Небольшая пауза перед новой попыткой
+                await asyncio.sleep(60)
 
 async def main():
     bot = CRMTelegramBot()
