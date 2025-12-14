@@ -95,18 +95,20 @@ class TelegramNotifier:
             hours = list(range(24))
             values = [counts.get(h, 0) for h in hours]
             total = sum(values)
-
             # Создаём график: столбцы + линия
             try:
+                # Используем headless backend (Agg) для серверного рендера
+                import matplotlib
+                matplotlib.use('Agg')
                 import matplotlib.pyplot as plt
-            except ImportError:
-                # Если matplotlib не установлен — отправим текстовую сводку
+            except Exception:
+                # Если matplotlib не установлен или не работает — отправим текстовую сводку
                 lines = [f"Статистика отправок (по {tz_name})"]
                 for h in hours:
                     lines.append(f"{h:02d}: {values[h]}")
                 lines.append(f"\nОтправлено за последние 24 часа: {total}")
                 await self.bot.send_message(chat_id=self.chat_id, text="\n".join(lines))
-                logger.warning("matplotlib not installed — отправлена текстовая статистика")
+                logger.warning("matplotlib not available — отправлена текстовая статистика")
                 return True
 
             fig, ax = plt.subplots(figsize=(12, 5))
