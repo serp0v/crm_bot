@@ -229,11 +229,16 @@ class CRMTelegramBot:
                 pass
 
     async def daily_stats_loop(self):
-        """Цикл, отправляющий статистику раз в сутки в 08:00 по Владивостоку (UTC+10)."""
+        """Цикл, отправляющий статистику раз в сутки в 08:00 по Владивостоку (UTC+10).
+
+        Добавлены retry при неудачной отправке (3 попытки с паузой 60s).
+        """
         tz_offset = 10  # Владивосток UTC+10
+        RETRIES = 3
+        RETRY_DELAY = 60
+
         while self.is_running:
             try:
-                # Текущее время в UTC и в локале Владивостока
                 now_utc = datetime.utcnow()
                 now_vl = now_utc + timedelta(hours=tz_offset)
 
@@ -242,7 +247,6 @@ class CRMTelegramBot:
                 if now_vl >= target_vl:
                     target_vl = target_vl + timedelta(days=1)
 
-                # Переводим цель в UTC и ждём
                 target_utc = target_vl - timedelta(hours=tz_offset)
                 sleep_seconds = (target_utc - now_utc).total_seconds()
 
@@ -257,15 +261,29 @@ class CRMTelegramBot:
                 if not self.is_running:
                     break
 
-                # Собираем статистику и отправляем
+                # Собираем статистику и пытаемся отправить с ретраями
                 counts = self.db.get_hourly_sent_counts_last_24h(tz_offset_hours=tz_offset)
-                await self.telegram_notifier.send_daily_stats(counts, tz_name='Владивосток')
+                attempt = 0
+                sent = False
+                while attempt < RETRIES and not sent and self.is_running:
+                    try:
+                        attempt += 1
+                        logger.info(f"Отправка ежедневной статистики: попытка {attempt}")
+                        sent = await self.telegram_notifier.send_daily_stats(counts, tz_name='Владивосток')
+                        if not sent:
+                            logger.warning(f"Попытка {attempt} не удалась — повтор через {RETRY_DELAY}s")
+                            await asyncio.sleep(RETRY_DELAY)
+                    except Exception as e:
+                        logger.error(f"Ошибка при отправке статистики в попытке {attempt}: {e}")
+                        await asyncio.sleep(RETRY_DELAY)
+
+                if not sent:
+                    logger.error("Не удалось отправить ежедневную статистику после нескольких попыток")
 
             except asyncio.CancelledError:
                 break
             except Exception as e:
                 logger.error(f"Ошибка в daily_stats_loop: {e}")
-                # Небольшая пауза перед новой попыткой
                 await asyncio.sleep(60)
 
 async def main():
